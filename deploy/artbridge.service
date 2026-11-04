@@ -1,0 +1,30 @@
+[Unit]
+Description=ArtBridge Art-Net / sACN subnet bridge
+Documentation=https://github.com/danieltrillo/artnet-bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=artbridge
+Group=artbridge
+WorkingDirectory=/opt/artbridge
+Environment=PYTHONPATH=/opt/artbridge
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 -m artbridge run -c /etc/artbridge/config.yaml
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=2
+
+# Hardening. The service only needs to write its own config file.
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/etc/artbridge
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target

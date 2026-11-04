@@ -1,0 +1,64 @@
+# ArtBridge configuration
+#
+# One "network" per subnet this box has a leg in. Routes say which universes
+# go where. Universes for Art-Net are written net.subnet.universe (0.0.0 is
+# the first one; some devices call that "universe 1"). sACN universes are a
+# plain number starting at 1.
+
+networks:
+  console:                      # any name you like
+    cidr: 2.0.0.10/8            # this box's IP on the console network
+    artnet:
+      enabled: true
+      reply: broadcast          # how ArtPollReply is sent back: broadcast | unicast
+      poll_interval: 3          # seconds between our own ArtPolls (0 = never poll)
+      short_name: ArtBridge     # what the console shows for this node (max 17 chars)
+      long_name: ""             # optional, max 63 chars
+    sacn:
+      enabled: false
+
+  stage:
+    cidr: 10.20.30.5/24         # this box's IP on the stage/node network
+    artnet:
+      enabled: true
+    sacn:
+      enabled: true
+      ttl: 1                    # multicast TTL for sACN sent on this network
+
+routes:
+  # Console universes 0.0.0 to 0.0.3 go to the stage network as a broadcast,
+  # keeping the same universe numbers.
+  - name: Console to stage
+    from: { network: console, protocol: artnet, universes: 0.0.0-0.0.3 }
+    to:
+      - { network: stage, protocol: artnet, universes: 0.0.0-0.0.3, mode: broadcast }
+
+  # Remap: console 0.0.4 becomes stage 0.1.0, unicast to two specific nodes.
+  - name: Remap to dimmers
+    enabled: false
+    from: { network: console, protocol: artnet, universe: 0.0.4 }
+    to:
+      - { network: stage, protocol: artnet, universe: 0.1.0, mode: unicast, targets: [10.20.30.50, 10.20.30.51] }
+
+  # Art-Net in, sACN out (multicast) with a priority.
+  - name: Art-Net to sACN
+    enabled: false
+    from: { network: console, protocol: artnet, universe: 0.0.5 }
+    to:
+      - { network: stage, protocol: sacn, universe: 6, mode: multicast, priority: 100 }
+
+  # mode: auto sends unicast to every node that announced the universe via
+  # ArtPollReply, and falls back to broadcast when none did.
+  # - { network: stage, protocol: artnet, universe: 0.0.0, mode: auto }
+
+web:
+  enabled: true
+  bind: 0.0.0.0
+  port: 8080
+
+log_level: info          # debug | info | warning | error
+forward_sync: true       # pass ArtSync through to the other networks
+forward_other: false     # also pass ArtTimeCode, ArtTrigger and ArtCommand through
+node_timeout: 10         # seconds without an ArtPollReply before a node is dropped
+sacn_source_name: ArtBridge
+# sacn_cid: 00000000-0000-0000-0000-000000000000   # fixed sACN source id (auto if empty)
