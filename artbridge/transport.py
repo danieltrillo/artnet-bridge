@@ -20,6 +20,10 @@ log = logging.getLogger(__name__)
 # Handler signature: (data, src_ip, src_port, dst_ip, local_ip, ifindex)
 PacketHandler = Callable[[bytes, str, int, str, str, int], None]
 
+# Python only grew socket.IP_PKTINFO in 3.12; Debian 12 ships 3.11. The
+# value is fixed on Linux (linux/in.h).
+IP_PKTINFO = getattr(socket, "IP_PKTINFO", 8)
+
 _PKTINFO_FMT = "i4s4s"  # ipi_ifindex, ipi_spec_dst, ipi_addr
 _PKTINFO_SIZE = struct.calcsize(_PKTINFO_FMT)
 _ANC_SPACE = socket.CMSG_SPACE(_PKTINFO_SIZE)
@@ -57,7 +61,7 @@ class UdpTransport:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        sock.setsockopt(socket.IPPROTO_IP, socket.IP_PKTINFO, 1)
+        sock.setsockopt(socket.IPPROTO_IP, IP_PKTINFO, 1)
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 0)
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, self._ttl)
         try:
@@ -100,7 +104,7 @@ class UdpTransport:
             local_ip = ""
             dst_ip = ""
             for level, ctype, cdata in ancdata:
-                if level == socket.IPPROTO_IP and ctype == socket.IP_PKTINFO and len(cdata) >= _PKTINFO_SIZE:
+                if level == socket.IPPROTO_IP and ctype == IP_PKTINFO and len(cdata) >= _PKTINFO_SIZE:
                     ifindex, spec_dst, hdr_dst = struct.unpack_from(_PKTINFO_FMT, cdata)
                     local_ip = socket.inet_ntoa(spec_dst)
                     dst_ip = socket.inet_ntoa(hdr_dst)
@@ -121,7 +125,7 @@ class UdpTransport:
                 anc = [
                     (
                         socket.IPPROTO_IP,
-                        socket.IP_PKTINFO,
+                        IP_PKTINFO,
                         struct.pack(
                             _PKTINFO_FMT, ifindex, socket.inet_aton(src_ip) if src_ip else b"\x00" * 4, b"\x00" * 4
                         ),

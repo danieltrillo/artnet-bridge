@@ -1,12 +1,13 @@
 import asyncio
 import socket
+import sys
 
 import pytest
 
 from artbridge.transport import UdpTransport
 
 
-@pytest.mark.skipif(not hasattr(socket, "IP_PKTINFO"), reason="needs Linux IP_PKTINFO")
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="needs Linux IP_PKTINFO")
 def test_loopback_delivery_reports_local_address():
     async def main():
         loop = asyncio.get_running_loop()
