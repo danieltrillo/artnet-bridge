@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ArtBridge</title>
+<link rel="stylesheet" href="/static/style.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231f2937'/%3E%3Cpath d='M6 20 L16 8 L26 20' stroke='%2334d399' stroke-width='4' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M9 24 H23' stroke='%2360a5fa' stroke-width='4' stroke-linecap='round'/%3E%3C/svg%3E">
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <span class="logo" aria-hidden="true"></span>
+    <span class="title">ArtBridge</span>
+    <span id="host" class="muted"></span>
+  </div>
+  <nav class="tabs" id="tabs">
+    <button data-tab="status" class="active">Status</button>
+    <button data-tab="nodes">Nodes</button>
+    <button data-tab="config">Config</button>
+    <button data-tab="log">Log</button>
+  </nav>
+  <div class="health" id="health"><span class="dot"></span><span id="health-text">connecting</span></div>
+</header>
+
+<div id="banner" class="banner hidden"></div>
+
+<main>
+  <section id="tab-status" class="tab active">
+    <div class="row-head">
+      <h2>Networks</h2>
+      <button class="btn small" id="btn-poll" title="Send an ArtPoll now and re-announce this bridge">Poll now</button>
+    </div>
+    <div id="networks" class="cards"></div>
+
+    <h2>Routes</h2>
+    <div id="routes"></div>
+
+    <div id="unrouted-wrap" class="hidden">
+      <h2>Seen but not routed</h2>
+      <p class="muted">DMX is arriving for these universes, but no route uses them.</p>
+      <div id="unrouted"></div>
+    </div>
+  </section>
+
+  <section id="tab-nodes" class="tab">
+    <div class="row-head">
+      <h2>Art-Net devices</h2>
+      <span class="muted" id="nodes-count"></span>
+    </div>
+    <p class="muted">Everything that answered an ArtPoll, per network. Outputs are universes the device listens for.</p>
+    <div id="nodes"></div>
+  </section>
+
+  <section id="tab-config" class="tab">
+    <div class="row-head">
+      <h2>Config</h2>
+      <div class="actions">
+        <label class="switch"><input type="checkbox" id="yaml-mode"> Edit as YAML</label>
+        <button class="btn" id="btn-discard">Discard</button>
+        <button class="btn primary" id="btn-save">Save &amp; apply</button>
+      </div>
+    </div>
+    <div id="config-error" class="error hidden"></div>
+    <div id="config-ok" class="ok hidden"></div>
+    <p class="muted" id="config-path"></p>
+
+    <div id="editor">
+      <h3>Networks <button class="btn small" id="btn-add-network">+ network</button></h3>
+      <p class="muted">One per subnet this box sits in. Addresses on this host: <span id="host-addresses">…</span></p>
+      <div id="ed-networks" class="cards"></div>
+
+      <h3>Routes <button class="btn small" id="btn-add-route">+ route</button></h3>
+      <p class="muted">Art-Net universes are net.subnet.universe (0.0.0 is the first). A range like 0.0.0-0.0.3 is fine. sACN universes start at 1.</p>
+      <div id="ed-routes"></div>
+
+      <h3>Options</h3>
+      <div class="card" id="ed-options"></div>
+    </div>
+
+    <div id="yaml-editor" class="hidden">
+      <textarea id="yaml" spellcheck="false"></textarea>
+    </div>
+  </section>
+
+  <section id="tab-log" class="tab">
+    <div class="row-head">
+      <h2>Log</h2>
+      <label class="switch"><input type="checkbox" id="log-follow" checked> Follow</label>
+    </div>
+    <pre id="log"></pre>
+  </section>
+</main>
+
+<footer class="muted">
+  <span id="version"></span> · Art-Net™ Designed by and Copyright Artistic Licence Holdings Ltd.
+</footer>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
