@@ -25,6 +25,7 @@ artbridge = ["example-config.yaml", "web/static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 
 [tool.ruff]
 exclude = ["build", "dist"]
