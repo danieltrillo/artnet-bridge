@@ -26,7 +26,7 @@ from .discovery import NodeTable
 from .frame import ARTNET, SACN, DmxFrame
 from .sacn import SACN_PORT
 from .stats import RateCounter
-from .transport import UdpTransport
+from .transport import UdpTransport, udp_buffer_errors
 
 log = logging.getLogger(__name__)
 
@@ -130,6 +130,7 @@ class Engine:
         self._poll_counter = 0
         self._last_discovery = 0.0
         self._last_refresh = 0.0
+        self._shared_ifaces: set[tuple[str, ...]] = set()
         self.started_at = 0.0
         self.running = False
         self._build_routes()
@@ -248,6 +249,13 @@ class Engine:
                     )
             if state.ifindex:
                 by_ifindex.setdefault(state.ifindex, []).append(state)
+        shared = {tuple(sorted(s.name for s in states)) for states in by_ifindex.values() if len(states) > 1}
+        for names in shared - self._shared_ifaces:
+            log.warning(
+                "networks %s are on the same interface; give each network its own interface",
+                ", ".join(f"'{n}'" for n in names),
+            )
+        self._shared_ifaces = shared
         self._by_ifindex = by_ifindex
         self._last_refresh = time.monotonic()
 
@@ -651,7 +659,11 @@ class Engine:
         now = time.monotonic()
         networks = []
         for state in self.networks.values():
-            live_rx = sorted(format_universe(p, u) for (p, u), t in state.last_rx.items() if now - t < ACTIVE_WINDOW)
+            live: dict[str, list[int]] = {}
+            for (proto, uni), t in state.last_rx.items():
+                if now - t < ACTIVE_WINDOW:
+                    live.setdefault(proto, []).append(uni)
+            live_rx = [label for proto in sorted(live) for label in universe_ranges(proto, live[proto])]
             networks.append(
                 {
                     "name": state.name,
@@ -672,10 +684,10 @@ class Engine:
                         "polls_rx": state.polls_rx.to_dict(now),
                         "replies_rx": state.replies_rx.to_dict(now),
                         "replies_tx": state.replies_tx.to_dict(now),
-                        "ports": [
-                            {"universe": artnet.format_universe(pa), "output": is_out, "input": is_in}
-                            for pa, is_out, is_in in state.ports
-                        ],
+                        # ranges, not one entry per port: with hundreds of universes
+                        # the per-port list was most of the status payload
+                        "accepts": universe_ranges(ARTNET, [pa for pa, is_out, _ in state.ports if is_out]),
+                        "sends": universe_ranges(ARTNET, [pa for pa, _, is_in in state.ports if is_in]),
                         "other_ops": {artnet.opcode_name(op): n for op, n in state.other_ops.items()},
                     },
                     "sacn": {
@@ -688,31 +700,7 @@ class Engine:
                     "live_universes": live_rx,
                 }
             )
-        routes = []
-        for route in self.routes:
-            src = route.cfg.source
-            routes.append(
-                {
-                    "name": route.cfg.name,
-                    "enabled": route.cfg.enabled,
-                    "from": {"network": src.network, "protocol": src.protocol, "universe": src.label},
-                    "rx": route.rx.to_dict(now),
-                    "last_source": route.last_source,
-                    "outputs": [
-                        {
-                            "network": o.cfg.network,
-                            "protocol": o.cfg.protocol,
-                            "universe": o.cfg.label,
-                            "mode": o.cfg.mode,
-                            "targets": o.current_targets or o.cfg.targets,
-                            "priority": o.cfg.priority,
-                            "tx": o.tx.to_dict(now),
-                            "errors": o.errors,
-                        }
-                        for o in route.outputs
-                    ],
-                }
-            )
+        routes = [_route_group_status(members, now) for members in _route_groups(self.routes)]
         unrouted = [
             {
                 "network": u.network,
@@ -734,6 +722,8 @@ class Engine:
                     "tx": transport.tx_packets,
                     "tx_errors": transport.tx_errors,
                     "last_error": transport.last_error,
+                    "rcvbuf": getattr(transport, "rcvbuf", 0),
+                    "sndbuf": getattr(transport, "sndbuf", 0),
                 }
             )
         return {
@@ -747,9 +737,94 @@ class Engine:
             "unrouted": unrouted,
             "dropped": dict(self.dropped),
             "transports": transports,
+            "udp": udp_buffer_errors(),
             "forward_sync": self.config.forward_sync,
             "forward_other": self.config.forward_other,
         }
+
+
+def universe_ranges(protocol: str, universes: list[int]) -> list[str]:
+    """[0, 1, 2, 5] -> ["0.0.0-0.0.2", "0.0.5"]: runs of consecutive universes."""
+    labels: list[str] = []
+    values = sorted(set(universes))
+    i = 0
+    while i < len(values):
+        j = i
+        while j + 1 < len(values) and values[j + 1] == values[j] + 1:
+            j += 1
+        first = format_universe(protocol, values[i])
+        labels.append(first if i == j else f"{first}-{format_universe(protocol, values[j])}")
+        i = j + 1
+    return labels
+
+
+def _route_groups(routes: list[RouteState]) -> list[list[RouteState]]:
+    """Put the per-universe pieces of a range route back together, in config order."""
+    groups: dict[int, list[RouteState]] = {}
+    for route in routes:
+        groups.setdefault(route.cfg.group, []).append(route)
+    return list(groups.values())
+
+
+def _sum_counters(counters: list[RateCounter], now: float) -> dict:
+    ages = [now - c.last for c in counters if c.last]
+    return {
+        "total": sum(c.total for c in counters),
+        "pps": round(sum(c.rate for c in counters), 1),
+        "age": round(min(ages), 1) if ages else None,
+    }
+
+
+def _is_live(counter: RateCounter, now: float) -> bool:
+    return bool(counter.last) and now - counter.last < ACTIVE_WINDOW
+
+
+def _route_group_status(members: list[RouteState], now: float) -> dict:
+    """One status entry for a route as written in the config, however many universes it covers."""
+    first = members[0]
+    src = first.cfg.source
+    live = [m for m in members if _is_live(m.rx, now)]
+    latest = max(members, key=lambda m: m.rx.last)
+    entry = {
+        "name": first.cfg.group_name or first.cfg.name,
+        "enabled": first.cfg.enabled,
+        "count": len(members),
+        "live": len(live),
+        "from": {
+            "network": src.network,
+            "protocol": src.protocol,
+            "universe": ", ".join(universe_ranges(src.protocol, [m.cfg.source.universe for m in members])),
+        },
+        "rx": _sum_counters([m.rx for m in members], now),
+        "last_source": latest.last_source,
+        "outputs": [],
+    }
+    if live and len(live) < len(members):
+        # Some universes of the range are flowing, these are not.
+        entry["missing"] = universe_ranges(
+            src.protocol, [m.cfg.source.universe for m in members if not _is_live(m.rx, now)]
+        )
+    for j, out in enumerate(first.outputs):
+        column = [m.outputs[j] for m in members if j < len(m.outputs)]
+        targets: list[str] = []
+        # multicast groups follow from the universe range; listing 384 of them helps nobody
+        for o in column if out.cfg.mode != "multicast" else ():
+            for t in o.current_targets or o.cfg.targets:
+                if t not in targets:
+                    targets.append(t)
+        entry["outputs"].append(
+            {
+                "network": out.cfg.network,
+                "protocol": out.cfg.protocol,
+                "universe": ", ".join(universe_ranges(out.cfg.protocol, [o.cfg.universe for o in column])),
+                "mode": out.cfg.mode,
+                "targets": targets,
+                "priority": out.cfg.priority,
+                "tx": _sum_counters([o.tx for o in column], now),
+                "errors": sum(o.errors for o in column),
+            }
+        )
+    return entry
 
 
 def _parse_mac(text: str) -> bytes:

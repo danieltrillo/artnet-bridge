@@ -136,7 +136,7 @@ routes:
 | key | meaning |
 |---|---|
 | `cidr` | This box's own IP and prefix on that network, like `2.0.0.10/8`. Or `ip` + `netmask`. |
-| `interface` | Optional. Normally found from the IP. |
+| `interface` | The NIC this network is on, like `eth1`. The web UI offers a list of this host's interfaces and fills in `cidr` from the one you pick. Each network needs its own interface. If left out, it is found from the IP. |
 | `broadcast` | Optional override, for example `255.255.255.255`. |
 | `artnet.reply` | `broadcast` (default, what most nodes do) or `unicast` back to whoever polled. |
 | `artnet.poll_interval` | How often the bridge sends its own ArtPoll to find nodes. |
@@ -203,6 +203,34 @@ MA's node list) and prints a live table of universes, fps, lost packets and
 the first eight channels. `send --sacn` and `listen --sacn` do the same for
 sACN. Run `artbridge send -h` / `artbridge listen -h` for all options.
 
+## Lots of universes
+
+A route takes up to 512 universes (`universes: 0.0.0-1.1.15` is 288,
+`0.0.0-1.7.15` is 384), and you can have as many routes as you like. The
+Status tab shows a range as one route with an "N/M live" count and lists the
+universes in it that have gone quiet.
+
+Rough numbers: 384 universes at 44 fps is about 17,000 packets a second in
+and the same out. In testing, 288 universes used a bit under half of one CPU
+core, most of it in the kernel sending packets. Give the LXC 2 cores for a
+rig that size, more if each universe goes to several destinations.
+
+The part that matters most is the UDP receive buffer. A console sends all of
+its universes in one burst, and the Linux default buffer holds only about a
+hundred packets, so the rest get dropped. ArtBridge asks for 8 MB, but the
+kernel caps that at `net.core.rmem_max`. In an unprivileged LXC that limit is
+set on the Proxmox host. `proxmox-create-lxc.sh` does this for you; on an
+existing setup run this on the Proxmox host, then restart ArtBridge:
+
+```bash
+printf 'net.core.rmem_max = 16777216\nnet.core.wmem_max = 16777216\n' > /etc/sysctl.d/90-artbridge.conf
+sysctl -p /etc/sysctl.d/90-artbridge.conf
+pct exec <CTID> -- systemctl restart artbridge
+```
+
+The Status tab warns when the buffer is small and when the kernel has
+dropped packets because it was full.
+
 ## How it works
 
 - One UDP socket per protocol (6454 for Art-Net, 5568 for sACN) bound to all
@@ -232,6 +260,7 @@ sACN. Run `artbridge send -h` / `artbridge listen -h` for all options.
 | Route stays at 0/s | Status tab → "seen but not routed" shows what is actually arriving and from where. Universe numbering (0 or 1 based) is the usual culprit. |
 | MA does not list the bridge | The MA and the bridge must be in the same subnet. Press **Poll now** in the Status tab; the bridge re-announces. Check the MA's Art-Net interface setting. |
 | Nodes do not get data in `auto` mode | They must answer ArtPoll. Nodes tab shows what answered; if empty, use `broadcast` or `unicast`. |
+| Status says the kernel dropped UDP packets, or some universes flicker | Socket buffer too small for the burst. See "Lots of universes". |
 | Send errors on a route | The Status tab shows a red counter. The log says why (usually the interface went down). |
 | Something odd on the wire | `log_level: debug`, then `journalctl -u artbridge -f`. |
 

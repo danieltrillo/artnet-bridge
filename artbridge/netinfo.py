@@ -123,3 +123,48 @@ def find_address(ip: str, addresses: list[Address] | None = None) -> Address | N
         if addr.ip == ip:
             return addr
     return None
+
+
+@dataclass(frozen=True)
+class Interface:
+    name: str
+    index: int
+    mac: str
+    up: bool
+    addresses: tuple[Address, ...]
+
+
+def _is_up(interface: str) -> bool:
+    try:
+        with open(f"/sys/class/net/{interface}/operstate", encoding="ascii") as fh:
+            state = fh.read().strip()
+    except OSError:
+        return True
+    # "unknown" is what loopback, tun and some veth/macvlan devices report
+    return state in ("up", "unknown")
+
+
+def list_interfaces(addresses: list[Address] | None = None) -> list[Interface]:
+    """Every network interface on this host, including ones without an IPv4 address."""
+    addresses = list_addresses() if addresses is None else addresses
+    try:
+        names = [(index, name) for index, name in socket.if_nameindex()]
+    except OSError:  # pragma: no cover - platform specific
+        names = []
+    seen = {name for _, name in names}
+    for addr in addresses:
+        if addr.interface not in seen:
+            names.append((addr.index, addr.interface))
+            seen.add(addr.interface)
+    result = []
+    for index, name in sorted(names):
+        result.append(
+            Interface(
+                name=name,
+                index=index,
+                mac=_mac_of(name),
+                up=_is_up(name),
+                addresses=tuple(a for a in addresses if a.interface == name),
+            )
+        )
+    return result

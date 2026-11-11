@@ -390,7 +390,8 @@ def test_status_is_json_serialisable():
     assert data["routes"][0]["outputs"][0]["targets"] == ["10.20.30.255"]
     assert data["nodes"][0]["ip"] == "10.20.30.50"
     assert data["unrouted"][0]["universe"] == "0.0.9"
-    assert data["networks"][0]["artnet"]["ports"][0] == {"universe": "0.0.0", "output": True, "input": False}
+    assert data["networks"][0]["artnet"]["accepts"] == ["0.0.0-0.0.3"]
+    assert data["networks"][0]["artnet"]["sends"] == []
 
 
 def test_start_and_stop_with_fake_transports():
@@ -444,3 +445,83 @@ def test_frames_keep_full_512_slots(universe):
     data = bytes(range(256)) * 2
     console_dmx(engine, universe, data=data)
     assert artnet.decode_dmx(engine.artnet_transport.take()[0][4]).data == data
+
+
+# -- big universe counts ---------------------------------------------------
+
+BIG = [
+    {
+        "name": "Rig",
+        "from": {"network": "console", "protocol": "artnet", "universes": "0.0.0-1.7.15"},
+        "to": [
+            {"network": "stage", "protocol": "artnet", "universe": "0.0.0", "mode": "broadcast"},
+            {"network": "stage", "protocol": "sacn", "universe": 1},
+        ],
+    }
+]
+
+
+def test_384_universes_forward_one_to_one():
+    engine = make_engine(BIG)
+    assert len(engine.routes) == 384
+    for u in range(384):
+        console_dmx(engine, artnet.format_universe(u), data=bytes([u & 0xFF, 7]))
+    art = engine.artnet_transport.take()
+    acn = engine.sacn_transport.take()
+    assert len(art) == 384 and len(acn) == 384
+    got = sorted(artnet.decode_dmx(p[4]).universe for p in art)
+    assert got == list(range(384))
+    assert sorted(sacn.decode_data(p[4]).universe for p in acn) == list(range(1, 385))
+
+
+def test_384_universes_are_announced_in_poll_replies():
+    engine = make_engine(BIG)
+    replies = [artnet.decode_poll_reply(p) for p in engine.build_poll_replies(engine.networks["console"], None, 0.0)]
+    assert len(replies) == 96
+    assert [r.bind_index for r in replies] == list(range(1, 97))
+    ports = sorted(u for r in replies for u in r.output_universes())
+    assert ports == list(range(384))
+
+
+def test_status_shows_a_range_route_as_one_entry():
+    engine = make_engine(BIG)
+    for u in range(380):
+        console_dmx(engine, artnet.format_universe(u))
+    status = engine.status()
+    assert len(status["routes"]) == 1
+    route = status["routes"][0]
+    assert route["name"] == "Rig" and route["count"] == 384 and route["live"] == 380
+    assert route["from"]["universe"] == "0.0.0-1.7.15"
+    assert route["missing"] == ["1.7.12-1.7.15"]
+    art_out, acn_out = route["outputs"]
+    assert art_out["universe"] == "0.0.0-1.7.15" and art_out["tx"]["total"] == 380
+    assert art_out["targets"] == ["10.20.30.255"]
+    assert acn_out["universe"] == "1-384" and acn_out["targets"] == []
+    console = status["networks"][0]
+    assert console["artnet"]["accepts"] == ["0.0.0-1.7.15"]
+    assert console["live_universes"] == ["0.0.0-1.7.11"]
+    assert len(json.dumps(status)) < 20000
+
+
+def test_universe_ranges():
+    from artbridge.engine import universe_ranges
+
+    assert universe_ranges("artnet", [5, 0, 1, 2, 16]) == ["0.0.0-0.0.2", "0.0.5", "0.1.0"]
+    assert universe_ranges("sacn", [1, 2, 3, 10]) == ["1-3", "10"]
+    assert universe_ranges("sacn", []) == []
+
+
+def test_two_networks_on_one_interface_are_logged(caplog):
+    addresses = [
+        netinfo.Address("eth0", 4, CONSOLE_IP, 8, "aa:bb:cc:dd:ee:01"),
+        netinfo.Address("eth0", 4, STAGE_IP, 24, "aa:bb:cc:dd:ee:01"),
+    ]
+    engine = Engine(
+        parse_config({"networks": {"a": {"cidr": f"{CONSOLE_IP}/8"}, "b": {"cidr": f"{STAGE_IP}/24"}}, "routes": []}),
+        transport_factory=FakeTransport,
+        address_source=lambda: addresses,
+        hostname="box",
+    )
+    with caplog.at_level("WARNING"):
+        engine.refresh_interfaces()
+    assert "'a', 'b' are on the same interface" in caplog.text

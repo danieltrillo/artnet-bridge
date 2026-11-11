@@ -32,6 +32,7 @@
       <button class="btn small" id="btn-poll" title="Send an ArtPoll now and re-announce this bridge">Poll now</button>
     </div>
     <div id="networks" class="cards"></div>
+    <p id="perf" class="muted hidden"></p>
 
     <h2>Routes</h2>
     <div id="routes"></div>
@@ -66,12 +67,12 @@
     <p class="muted" id="config-path"></p>
 
     <div id="editor">
-      <h3>Networks <button class="btn small" id="btn-add-network">+ network</button></h3>
-      <p class="muted">One per subnet this box sits in. Addresses on this host: <span id="host-addresses">…</span></p>
+      <h3>Networks <button class="btn small" id="btn-add-network">+ network</button> <button class="btn small" id="btn-rescan" title="Read this host's interfaces again">Rescan interfaces</button></h3>
+      <p class="muted">One per subnet this box sits in, each on its own interface. Pick the interface and its address fills in. Addresses on this host: <span id="host-addresses">…</span></p>
       <div id="ed-networks" class="cards"></div>
 
       <h3>Routes <button class="btn small" id="btn-add-route">+ route</button></h3>
-      <p class="muted">Art-Net universes are net.subnet.universe (0.0.0 is the first). A range like 0.0.0-0.0.3 is fine. sACN universes start at 1.</p>
+      <p class="muted">Art-Net universes are net.subnet.universe (0.0.0 is the first). A range like 0.0.0-0.0.3 is fine (up to 512 universes per route, e.g. 0.0.0-1.1.15 is 288). sACN universes start at 1.</p>
       <div id="ed-routes"></div>
 
       <h3>Options</h3>

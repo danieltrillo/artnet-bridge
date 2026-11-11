@@ -203,3 +203,68 @@ def test_dict_and_yaml_roundtrip():
     third = parse_yaml(text)
     assert third.networks["stage"].cidr == "10.20.30.5/24"
     assert third.sacn_cid == cfg.sacn_cid
+
+
+# -- interfaces ------------------------------------------------------------
+
+
+def _two_nets(a_iface=None, b_iface=None, b_cidr="10.0.0.6/22"):
+    nets = {"console": {"cidr": "10.0.0.5/22"}, "stage": {"cidr": b_cidr}}
+    if a_iface:
+        nets["console"]["interface"] = a_iface
+    if b_iface:
+        nets["stage"]["interface"] = b_iface
+    return {"networks": nets, "routes": []}
+
+
+def test_same_interface_on_two_networks_is_rejected():
+    with pytest.raises(ConfigError, match="interface eth85 is already used by network 'console'"):
+        parse_config(_two_nets("eth85", "eth85"))
+
+
+def test_different_interfaces_are_fine():
+    cfg = parse_config(_two_nets("eth85", "eth82", "10.201.82.64/24"))
+    assert cfg.networks["stage"].interface == "eth82"
+
+
+def test_host_check_catches_two_networks_on_one_interface_by_ip():
+    from artbridge import netinfo
+    from artbridge.config import check_host_interfaces
+
+    addresses = [
+        netinfo.Address("eth85", 3, "10.0.0.5", 22),
+        netinfo.Address("eth85", 3, "10.0.0.6", 22),
+        netinfo.Address("eth82", 2, "10.201.82.64", 24),
+    ]
+    with pytest.raises(ConfigError, match="each network needs its own interface"):
+        check_host_interfaces(parse_config(_two_nets()), addresses)
+    # explicit name for one, IP lookup for the other: still the same NIC
+    with pytest.raises(ConfigError, match="eth85"):
+        check_host_interfaces(parse_config(_two_nets("eth85")), addresses)
+    check_host_interfaces(parse_config(_two_nets(None, None, "10.201.82.64/24")), addresses)
+    # an IP that is not on this host yet is not judged
+    check_host_interfaces(parse_config(_two_nets("eth85", None, "192.168.9.9/24")), addresses)
+
+
+def test_range_route_keeps_its_group():
+    cfg = parse_config(
+        {
+            "networks": BASE["networks"],
+            "routes": [
+                {
+                    "name": "single",
+                    "from": {"network": "console", "universe": "0.0.0"},
+                    "to": [{"network": "stage", "universe": "0.0.0"}],
+                },
+                {
+                    "name": "big",
+                    "from": {"network": "console", "universes": "0.1.0-1.2.15"},
+                    "to": [{"network": "stage", "universe": "0.1.0"}],
+                },
+            ],
+        }
+    )
+    big = [r for r in cfg.routes if r.group_name == "big"]
+    assert len(big) == 288
+    assert {r.group for r in big} == {1}
+    assert cfg.routes[0].group == 0 and cfg.routes[0].group_name == "single"

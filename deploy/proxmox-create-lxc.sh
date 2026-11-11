@@ -24,7 +24,7 @@ STORAGE="${STORAGE:-local-lvm}"
 TEMPLATE_STORAGE="${TEMPLATE_STORAGE:-local}"
 DISK_GB="${DISK_GB:-4}"
 MEMORY="${MEMORY:-512}"
-CORES="${CORES:-1}"
+CORES="${CORES:-2}"
 NET0="${NET0:-bridge=vmbr0,ip=2.0.0.10/8}"
 NET1="${NET1:-bridge=vmbr0,ip=10.20.30.5/24}"
 MGMT="${MGMT:-}"
@@ -72,6 +72,15 @@ fi
 if [[ -n "$SSH_KEY" ]]; then
   ARGS+=(--ssh-public-keys "$SSH_KEY")
 fi
+
+# Bigger UDP socket buffers for bursts of a few hundred universes. These are
+# host wide on most Proxmox kernels and an unprivileged container cannot set
+# them itself.
+SYSCTL_FILE=/etc/sysctl.d/90-artbridge.conf
+if [[ ! -f "$SYSCTL_FILE" ]]; then
+  printf 'net.core.rmem_max = 16777216\nnet.core.wmem_max = 16777216\n' > "$SYSCTL_FILE"
+fi
+sysctl -q -p "$SYSCTL_FILE" || echo "could not apply $SYSCTL_FILE; ArtBridge still works, with smaller buffers"
 
 echo "creating container $CTID ($HOSTNAME_)"
 pct create "$CTID" "$TEMPLATE_STORAGE:vztmpl/$TEMPLATE" "${ARGS[@]}"
