@@ -102,6 +102,10 @@ class RouteConfig:
     source: EndpointConfig
     outputs: list[OutputConfig]
     enabled: bool = True
+    # Ranges are expanded into one RouteConfig per universe; these tie the
+    # pieces back to the route as written so the UI can show it as one.
+    group: int = 0
+    group_name: str = ""
 
 
 @dataclass
@@ -420,6 +424,8 @@ def _parse_route(index: int, raw: Any, networks: dict[str, NetworkConfig]) -> li
                 enabled=enabled,
                 source=EndpointConfig(network=src_network, protocol=src_protocol, universe=universe),
                 outputs=outputs_per_universe[i],
+                group=index,
+                group_name=name,
             )
         )
     return routes
@@ -458,6 +464,16 @@ def parse_config(raw: Any) -> Config:
         if net.ip in seen_ips:
             raise ConfigError(f"networks.{net.name}: IP {net.ip} is already used by network '{seen_ips[net.ip]}'")
         seen_ips[net.ip] = net.name
+    seen_ifaces: dict[str, str] = {}
+    for net in networks.values():
+        if not net.interface:
+            continue
+        if net.interface in seen_ifaces:
+            raise ConfigError(
+                f"networks.{net.name}: interface {net.interface} is already used by network "
+                f"'{seen_ifaces[net.interface]}'; each network needs its own interface"
+            )
+        seen_ifaces[net.interface] = net.name
 
     raw_routes = top.get("routes")
     if raw_routes is None:
@@ -496,6 +512,29 @@ def parse_config(raw: Any) -> Config:
         sacn_source_name=_str(top.get("sacn_source_name"), "sacn_source_name", "ArtBridge")[:63] or "ArtBridge",
         sacn_cid=cid,
     )
+
+
+def check_host_interfaces(cfg: Config, addresses: list) -> None:
+    """Refuse two networks that end up on the same interface of this host.
+
+    A network's interface is the one named in the config or, when none is
+    named, the one that holds its IP. Networks whose interface cannot be
+    worked out (the IP is not on this host yet) are left alone.
+    `addresses` is a list of netinfo.Address.
+    """
+    owner: dict[str, str] = {}
+    for net in cfg.networks.values():
+        iface = net.interface
+        if not iface:
+            iface = next((a.interface for a in addresses if a.ip == net.ip), None)
+        if not iface:
+            continue
+        if iface in owner:
+            raise ConfigError(
+                f"networks.{net.name}: interface {iface} is already used by network '{owner[iface]}'; "
+                "each network needs its own interface"
+            )
+        owner[iface] = net.name
 
 
 def parse_yaml(text: str) -> Config:

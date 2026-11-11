@@ -9,7 +9,7 @@ import yaml
 from aiohttp import web
 
 from .. import netinfo
-from ..config import ConfigError, config_to_dict, dump_yaml, parse_config, parse_yaml
+from ..config import ConfigError, check_host_interfaces, config_to_dict, dump_yaml, parse_config, parse_yaml
 
 if TYPE_CHECKING:
     from ..app import Supervisor
@@ -36,12 +36,33 @@ async def api_log(request: web.Request) -> web.Response:
 
 
 async def api_interfaces(request: web.Request) -> web.Response:
-    addresses = [
-        {"interface": a.interface, "ip": a.ip, "prefix": a.prefix, "cidr": a.cidr, "mac": a.mac}
-        for a in netinfo.list_addresses()
-        if a.interface != "lo"
+    """Every interface on this host (loopback left out) with its IPv4 addresses."""
+    addresses = [a for a in netinfo.list_addresses() if a.interface != "lo"]
+    interfaces = [
+        {
+            "name": i.name,
+            "mac": i.mac,
+            "up": i.up,
+            "addresses": [{"ip": a.ip, "prefix": a.prefix, "cidr": a.cidr} for a in i.addresses],
+        }
+        for i in netinfo.list_interfaces(addresses)
+        if i.name != "lo"
     ]
-    return web.json_response({"addresses": addresses})
+    return web.json_response(
+        {
+            "addresses": [
+                {"interface": a.interface, "ip": a.ip, "prefix": a.prefix, "cidr": a.cidr, "mac": a.mac}
+                for a in addresses
+            ],
+            "interfaces": interfaces,
+        }
+    )
+
+
+def _check_host(text_or_raw) -> None:
+    """Config checks that need this host's interfaces. Raises ConfigError."""
+    config = parse_yaml(text_or_raw) if isinstance(text_or_raw, str) else parse_config(text_or_raw)
+    check_host_interfaces(config, netinfo.list_addresses())
 
 
 async def api_config_get(request: web.Request) -> web.Response:
@@ -87,6 +108,10 @@ async def api_config_put(request: web.Request) -> web.Response:
     else:
         return _error("send 'yaml' or 'config'")
     try:
+        _check_host(text)
+    except ConfigError as exc:
+        return _error(str(exc))
+    try:
         config = await sup.apply_text(text)
     except ConfigError as exc:
         return _error(str(exc))
@@ -113,6 +138,7 @@ async def api_validate(request: web.Request) -> web.Response:
             config = parse_yaml(body["yaml"])
         else:
             config = parse_config(body.get("config"))
+        check_host_interfaces(config, netinfo.list_addresses())
     except ConfigError as exc:
         return web.json_response({"ok": False, "error": str(exc)})
     return web.json_response({"ok": True, "config": config_to_dict(config)})

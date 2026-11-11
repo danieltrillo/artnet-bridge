@@ -61,6 +61,19 @@ PYTHONPATH=/opt/artbridge exec /usr/bin/python3 -m artbridge "$@"
 EOF
 chmod 755 /usr/local/bin/artbridge
 
+# Bigger UDP socket buffers for bursts of a few hundred universes. In an
+# unprivileged LXC this usually has to be done on the Proxmox host instead.
+SYSCTL_FILE=/etc/sysctl.d/90-artbridge.conf
+printf 'net.core.rmem_max = 16777216\nnet.core.wmem_max = 16777216\n' > "$SYSCTL_FILE"
+if ! sysctl -q -p "$SYSCTL_FILE" >/dev/null 2>&1; then
+  rm -f "$SYSCTL_FILE"  # not allowed here (unprivileged LXC); keep boot logs clean
+fi
+CUR_RMEM="$(cat /proc/sys/net/core/rmem_max 2>/dev/null || echo 0)"
+BUF_HINT=""
+if [[ "$CUR_RMEM" -lt 8388608 ]]; then
+  BUF_HINT=1
+fi
+
 cp "$SRC/deploy/artbridge.service" /etc/systemd/system/artbridge.service
 systemctl daemon-reload
 systemctl enable artbridge >/dev/null 2>&1
@@ -83,6 +96,12 @@ EOF
   echo "  web UI:  http://<this-host>:$PORT"
   echo "  this host's addresses:"
   artbridge interfaces | sed 's/^/    /'
+  if [[ -n "${BUF_HINT:-}" ]]; then
+    echo
+    echo "  note: UDP buffers are small (net.core.rmem_max=$CUR_RMEM). Fine for a few universes;"
+    echo "  for hundreds, run this on the Proxmox host, then restart ArtBridge:"
+    echo "    printf 'net.core.rmem_max = 16777216\\nnet.core.wmem_max = 16777216\\n' > /etc/sysctl.d/90-artbridge.conf && sysctl -p /etc/sysctl.d/90-artbridge.conf"
+  fi
 else
   echo "ArtBridge did not start. See: journalctl -u artbridge -n 50" >&2
   exit 1

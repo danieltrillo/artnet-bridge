@@ -181,3 +181,9 @@ pre#log .t { color: var(--muted); }
   .route .arrow { transform: rotate(90deg); text-align: center; }
   .top { gap: 0.6rem; }
 }
+
+.warn-text { color: var(--warn); }
+.hint { font-size: 0.85rem; margin: 0.2rem 0 0.4rem; min-height: 0; }
+.hint:empty { display: none; }
+.hint.warn { color: var(--warn); }
+.hint.bad { color: var(--bad); }

@@ -15,6 +15,8 @@
     yamlText: "",
     yamlMode: false,
     addresses: [],
+    interfaces: [],
+    udpBase: null,
     configLoaded: false,
     lastLogCount: 0,
   };
@@ -98,12 +100,12 @@
       const polls = n.artnet.enabled
         ? `<dt>Polls</dt><dd>${n.artnet.polls_rx.total} received, ${n.artnet.replies_tx.total} answered, ${n.artnet.replies_rx.total} node replies</dd>`
         : "";
-      const accepts = n.artnet.ports.filter((p) => p.output);
-      const sends = n.artnet.ports.filter((p) => p.input);
-      const ports = (n.artnet.enabled && n.artnet.ports.length
+      const accepts = n.artnet.accepts || [];
+      const sends = n.artnet.sends || [];
+      const ports = (n.artnet.enabled && (accepts.length || sends.length)
         ? `<dt>Node name</dt><dd>${esc(n.artnet.short_name)}</dd>` : "")
-        + (accepts.length ? `<dt>Accepts</dt><dd title="Universes a console on this network can send to this bridge">${accepts.map((p) => `<span class="pill accent">${esc(p.universe)}</span>`).join(" ")}</dd>` : "")
-        + (sends.length ? `<dt>Sends</dt><dd title="Universes this bridge puts onto this network">${sends.map((p) => `<span class="pill">${esc(p.universe)}</span>`).join(" ")}</dd>` : "");
+        + (accepts.length ? `<dt>Accepts</dt><dd title="Universes a console on this network can send to this bridge">${accepts.map((u) => `<span class="pill accent">${esc(u)}</span>`).join(" ")}</dd>` : "")
+        + (sends.length ? `<dt>Sends</dt><dd title="Universes this bridge puts onto this network">${sends.map((u) => `<span class="pill">${esc(u)}</span>`).join(" ")}</dd>` : "");
       const live = n.live_universes.length ? `<dt>Live now</dt><dd class="live">${n.live_universes.map(esc).join(", ")}</dd>` : "";
       const listening = n.sacn.enabled && n.sacn.listening.length ? `<dt>sACN groups</dt><dd>${n.sacn.listening.join(", ")}</dd>` : "";
       return `<div class="card">
@@ -114,6 +116,20 @@
         </dl>
       </div>`;
     }).join("") || '<p class="muted">No networks configured.</p>';
+
+    // socket buffers and kernel drops
+    const notes = [];
+    const art = st.transports && st.transports.artnet;
+    if (art && art.rcvbuf && art.rcvbuf < 1024 * 1024) {
+      notes.push(`<span class="warn-text">Art-Net receive buffer is only ${Math.round(art.rcvbuf / 1024)} KB, big universe counts can drop packets. See README, "Lots of universes".</span>`);
+    }
+    if (st.udp) {
+      if (state.udpBase == null) state.udpBase = st.udp.rcvbuf_errors;
+      const lost = st.udp.rcvbuf_errors - state.udpBase;
+      if (lost > 0) notes.push(`<span class="warn-text">Kernel dropped ${lost} UDP packets since this page opened (receive buffer full).</span>`);
+    }
+    $("#perf").innerHTML = notes.join("<br>");
+    $("#perf").classList.toggle("hidden", !notes.length);
 
     // routes
     $("#routes").innerHTML = (st.routes || []).map((r) => {
@@ -131,8 +147,15 @@
           <div class="sub">on ${esc(o.network)} · ${where}${prio} · ${pps(o.tx)}${err}</div>
         </div>`;
       }).join("");
+      const count = r.count > 1
+        ? ` <span class="pill ${r.live === r.count ? "good" : r.live ? "warn" : ""}" title="Universes in this route that are receiving DMX">${r.live}/${r.count} live</span>`
+        : "";
+      const missing = r.missing && r.missing.length
+        ? `<div class="sub warn-text" title="Part of this range is flowing, these universes are not">No DMX on ${r.missing.map(esc).join(", ")}</div>`
+        : "";
       return `<div class="route ${r.enabled ? "" : "off"}">
-        <div class="head"><span class="name">${esc(r.name)}</span>${r.enabled ? "" : '<span class="pill">disabled</span>'}</div>
+        <div class="head"><span class="name">${esc(r.name)}</span>${count}${r.enabled ? "" : '<span class="pill">disabled</span>'}</div>
+        ${missing}
         <div class="flow"><div>${from}</div><div class="arrow">→</div><div>${outs}</div></div>
       </div>`;
     }).join("") || '<p class="muted">No routes yet. Add one in the Config tab.</p>';
@@ -358,20 +381,123 @@
     sacn: [["multicast", "multicast"], ["unicast", "unicast to targets"]],
   };
 
+  // interfaces -----------------------------------------------------------
+
+  function hostInterface(name) {
+    return state.interfaces.find((i) => i.name === name) || null;
+  }
+
+  // Which interface a network is on: the one picked, or the one holding its IP.
+  function effectiveInterface(n) {
+    if ((n.interface || "").trim()) return n.interface.trim();
+    const ip = String(n.cidr || "").split("/")[0].trim();
+    const hit = state.addresses.find((a) => a.ip === ip);
+    return hit ? hit.interface : "";
+  }
+
+  function interfaceOwner(name, exceptIndex) {
+    return state.draft.networks.find((n, i) => i !== exceptIndex && name && effectiveInterface(n) === name) || null;
+  }
+
+  function duplicateInterfaces(d) {
+    const seen = {};
+    const dupes = new Set();
+    for (const n of d.networks) {
+      const name = effectiveInterface(n);
+      if (!name) continue;
+      if (seen[name]) dupes.add(name);
+      seen[name] = true;
+    }
+    return dupes;
+  }
+
+  function interfaceLabel(i) {
+    const addrs = i.addresses.map((a) => a.cidr).join(", ") || "no IPv4 address";
+    return `${i.name} · ${addrs}${i.up ? "" : " (down)"}`;
+  }
+
+  function interfaceSelect(n, index, cidrInput) {
+    const sel = el("select");
+    sel.append(el("option", { value: "", text: state.interfaces.length ? "Pick an interface…" : "No interfaces found" }));
+    for (const i of state.interfaces) {
+      const owner = interfaceOwner(i.name, index);
+      const opt = el("option", { value: i.name, text: interfaceLabel(i) + (owner ? ` · used by ${owner.name || "another network"}` : "") });
+      if (owner) opt.disabled = true;
+      sel.append(opt);
+    }
+    const current = (n.interface || "").trim();
+    if (current && !hostInterface(current)) {
+      // Configured, but this host does not have it (renamed, or a typo).
+      sel.append(el("option", { value: current, text: `${current} · not on this host` }));
+    }
+    sel.value = current;
+    sel.addEventListener("change", () => {
+      n.interface = sel.value;
+      const iface = hostInterface(sel.value);
+      if (iface && iface.addresses.length) {
+        // Fill in this box's address on that interface; keep a manual pick if it is one of them.
+        const keep = iface.addresses.find((a) => a.cidr === n.cidr);
+        n.cidr = (keep || iface.addresses[0]).cidr;
+        cidrInput.value = n.cidr;
+        n.broadcast = "";
+      }
+      if (iface && !n.name) n.name = iface.name;
+      renderEditor();
+    });
+    return sel;
+  }
+
+  function interfaceHint(n, dupes) {
+    const name = (n.interface || "").trim();
+    const eff = effectiveInterface(n);
+    if (eff && dupes.has(eff)) return { level: "bad", text: `${eff} is used by more than one network. Each network needs its own interface.` };
+    if (!name) {
+      return eff
+        ? { level: "warn", text: `No interface picked; this IP is on ${eff}. Pick it above to lock it in.` }
+        : { level: "warn", text: "Pick the interface this network is on." };
+    }
+    const iface = hostInterface(name);
+    if (!iface) return { level: "bad", text: `${name} is not on this host. Pick one from the list.` };
+    const cidr = String(n.cidr || "").trim();
+    if (!iface.addresses.length) return { level: "warn", text: `${name} has no IPv4 address yet; type the address you will give it.` };
+    if (!iface.addresses.some((a) => a.cidr === cidr)) {
+      const ip = cidr.split("/")[0];
+      const fix = (iface.addresses.find((a) => a.ip === ip) || iface.addresses[0]).cidr;
+      return { level: "bad", fix, text: `${name} has ${iface.addresses.map((a) => a.cidr).join(", ")}, not ${cidr || "this"}.` };
+    }
+    return null;
+  }
+
   function renderEditor() {
     const d = state.draft;
     if (!d) return;
     $("#host-addresses").textContent = state.addresses.length ? state.addresses.map((a) => `${a.cidr} (${a.interface})`).join(", ") : "none found";
+    const dupes = duplicateInterfaces(d);
 
     // networks
     const netWrap = $("#ed-networks");
     netWrap.innerHTML = "";
     d.networks.forEach((n, i) => {
       const card = el("div", { class: "card" });
+      const cidrInput = textInput(n, "cidr", { placeholder: "2.0.0.10/8", mono: true });
+      const hint = el("div", { class: "hint" });
+      const showHint = () => {
+        const msg = interfaceHint(n, dupes);
+        hint.textContent = msg ? msg.text + " " : "";
+        hint.className = "hint " + (msg ? msg.level : "");
+        if (msg && msg.fix) {
+          hint.append(el("button", { class: "btn small", text: `Use ${msg.fix}`, onclick: () => { n.cidr = msg.fix; n.broadcast = ""; renderEditor(); } }));
+        }
+      };
+      cidrInput.addEventListener("input", showHint);
       card.append(el("div", { class: "grid c2" }, [
         field("Name", textInput(n, "name", { placeholder: "console" })),
-        field("This box's IP / prefix", textInput(n, "cidr", { placeholder: "2.0.0.10/8", mono: true })),
+        field("Interface", interfaceSelect(n, i, cidrInput)),
+        field("This box's IP / prefix", cidrInput),
+        field("Broadcast (optional)", textInput(n, "broadcast", { placeholder: "auto", mono: true })),
       ]));
+      card.append(hint);
+      showHint();
       card.append(el("div", { class: "section", text: "Art-Net" }));
       card.append(el("div", { class: "grid c3" }, [
         checkbox(n.artnet, "enabled", "Enabled"),
@@ -384,11 +510,6 @@
       card.append(el("div", { class: "grid c3" }, [
         checkbox(n.sacn, "enabled", "Enabled"),
         field("Multicast TTL", textInput(n.sacn, "ttl", { type: "number", min: 1, max: 255 })),
-      ]));
-      card.append(el("div", { class: "section", text: "Advanced" }));
-      card.append(el("div", { class: "grid c2" }, [
-        field("Interface (optional)", textInput(n, "interface", { placeholder: "auto" })),
-        field("Broadcast (optional)", textInput(n, "broadcast", { placeholder: "auto", mono: true })),
       ]));
       card.append(el("div", { class: "tools" }, [
         el("button", { class: "btn small danger", text: "Remove network", onclick: () => { d.networks.splice(i, 1); renderEditor(); } }),
@@ -483,10 +604,26 @@
     if (state.configLoaded) go(); else loadConfig().then(go);
   }
 
-  $("#btn-add-network").addEventListener("click", () => {
-    state.draft.networks.push({ name: "", cidr: "", interface: "", broadcast: "", artnet: { enabled: true, reply: "broadcast", poll_interval: 3, short_name: "ArtBridge", long_name: "" }, sacn: { enabled: false, ttl: 1 } });
+  $("#btn-add-network").addEventListener("click", async () => {
+    await loadInterfaces();
+    const n = { name: "", cidr: "", interface: "", broadcast: "", artnet: { enabled: true, reply: "broadcast", poll_interval: 3, short_name: "ArtBridge", long_name: "" }, sacn: { enabled: false, ttl: 1 } };
+    const free = state.interfaces.find((i) => i.addresses.length && !interfaceOwner(i.name, -1));
+    if (free) {
+      n.interface = free.name;
+      n.cidr = free.addresses[0].cidr;
+      if (!state.draft.networks.some((x) => x.name === free.name)) n.name = free.name;
+    }
+    state.draft.networks.push(n);
     renderEditor();
   });
+
+  $("#btn-rescan").addEventListener("click", async () => { await loadInterfaces(); renderEditor(); });
+
+  async function loadInterfaces() {
+    const ifs = await api("/api/interfaces");
+    state.addresses = (ifs && ifs.addresses) || [];
+    state.interfaces = (ifs && ifs.interfaces) || [];
+  }
   $("#btn-add-route").addEventListener("click", () => { state.draft.routes.push(newRoute()); renderEditor(); });
 
   function showConfigMessage(ok, text) {
@@ -496,8 +633,7 @@
   }
 
   async function loadConfig() {
-    const [cfg, ifs] = await Promise.all([api("/api/config"), api("/api/interfaces")]);
-    state.addresses = (ifs && ifs.addresses) || [];
+    const [cfg] = await Promise.all([api("/api/config"), loadInterfaces()]);
     state.raw = cfg.raw;
     state.yamlText = cfg.yaml || "";
     state.draft = normaliseDraft(cfg.raw || {});
@@ -538,6 +674,13 @@
     const btn = $("#btn-save");
     btn.disabled = true;
     try {
+      if (!state.yamlMode) {
+        const dupes = duplicateInterfaces(state.draft);
+        if (dupes.size) {
+          showConfigMessage(false, `Interface ${[...dupes].join(", ")} is used by more than one network. Each network needs its own interface.`);
+          return;
+        }
+      }
       const body = state.yamlMode ? { yaml: $("#yaml").value } : { config: draftToConfig(state.draft) };
       const res = await api("/api/config", { method: "PUT", body: JSON.stringify(body) });
       if (!res.ok) {

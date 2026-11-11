@@ -29,6 +29,44 @@ _PKTINFO_SIZE = struct.calcsize(_PKTINFO_FMT)
 _ANC_SPACE = socket.CMSG_SPACE(_PKTINFO_SIZE)
 _MAX_BATCH = 256
 
+# A console sending a few hundred universes puts them on the wire as one
+# burst. The kernel default (about 208 KB) holds only ~100 full ArtDmx
+# packets, so ask for more. Unprivileged processes are capped at
+# net.core.rmem_max / wmem_max; deploy/install.sh raises those.
+BUFFER_BYTES = 8 * 1024 * 1024
+SMALL_BUFFER_WARN = 1024 * 1024
+
+
+def _grow_buffer(sock: socket.socket, opt: int, force_opt: int | None, size: int) -> int:
+    """Ask for `size` bytes of socket buffer; returns what the kernel gave."""
+    if force_opt is not None:
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, force_opt, size)  # needs CAP_NET_ADMIN
+        except OSError:
+            pass
+    if sock.getsockopt(socket.SOL_SOCKET, opt) < size:
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, opt, size)
+        except OSError:
+            pass
+    return sock.getsockopt(socket.SOL_SOCKET, opt)
+
+
+def udp_buffer_errors() -> dict[str, int] | None:
+    """Kernel UDP counters for this network namespace (packets lost to full buffers)."""
+    try:
+        with open("/proc/net/snmp", encoding="ascii") as fh:
+            lines = [line.split() for line in fh if line.startswith("Udp:")]
+    except OSError:
+        return None
+    if len(lines) < 2:
+        return None
+    row = dict(zip(lines[0][1:], lines[1][1:], strict=False))
+    try:
+        return {"rcvbuf_errors": int(row.get("RcvbufErrors", 0)), "sndbuf_errors": int(row.get("SndbufErrors", 0))}
+    except ValueError:
+        return None
+
 
 class UdpTransport:
     def __init__(self, port: int, handler: PacketHandler, *, multicast_ttl: int = 1, bind_ip: str = "") -> None:
@@ -42,6 +80,9 @@ class UdpTransport:
         self.tx_packets = 0
         self.tx_errors = 0
         self._last_error = ""
+        self.rcvbuf = 0
+        self.sndbuf = 0
+        self._anc_cache: dict[tuple[str, int], list] = {}
 
     @property
     def is_open(self) -> bool:
@@ -64,10 +105,17 @@ class UdpTransport:
         sock.setsockopt(socket.IPPROTO_IP, IP_PKTINFO, 1)
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 0)
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, self._ttl)
-        try:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)
-        except OSError:
-            pass
+        # Linux reports twice the requested size (it counts bookkeeping too).
+        self.rcvbuf = _grow_buffer(sock, socket.SO_RCVBUF, getattr(socket, "SO_RCVBUFFORCE", 33), BUFFER_BYTES)
+        self.sndbuf = _grow_buffer(sock, socket.SO_SNDBUF, getattr(socket, "SO_SNDBUFFORCE", 32), BUFFER_BYTES)
+        if self.rcvbuf < SMALL_BUFFER_WARN or self.sndbuf < SMALL_BUFFER_WARN:
+            log.warning(
+                "udp/%d: socket buffers are small (receive %d KB, send %d KB); with many universes packets "
+                "can be dropped. Raise net.core.rmem_max and net.core.wmem_max (see README).",
+                self.port,
+                self.rcvbuf // 1024,
+                self.sndbuf // 1024,
+            )
         sock.setblocking(False)
         sock.bind((self.bind_ip, self.port))
         self._sock = sock
@@ -122,15 +170,11 @@ class UdpTransport:
             return False
         try:
             if src_ip or ifindex:
-                anc = [
-                    (
-                        socket.IPPROTO_IP,
-                        IP_PKTINFO,
-                        struct.pack(
-                            _PKTINFO_FMT, ifindex, socket.inet_aton(src_ip) if src_ip else b"\x00" * 4, b"\x00" * 4
-                        ),
-                    )
-                ]
+                anc = self._anc_cache.get((src_ip, ifindex))
+                if anc is None:
+                    spec = socket.inet_aton(src_ip) if src_ip else b"\x00" * 4
+                    anc = [(socket.IPPROTO_IP, IP_PKTINFO, struct.pack(_PKTINFO_FMT, ifindex, spec, b"\x00" * 4))]
+                    self._anc_cache[(src_ip, ifindex)] = anc
                 sock.sendmsg([data], anc, 0, (dest_ip, dest_port))
             else:
                 sock.sendto(data, (dest_ip, dest_port))
